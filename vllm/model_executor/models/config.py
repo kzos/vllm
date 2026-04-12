@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
 from math import lcm
+import math
+import os
 from typing import TYPE_CHECKING
+
+import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
@@ -141,8 +145,23 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
+            turboquant_attn_page_size_1_token = None
+        elif cache_config.cache_dtype == "turboquant":
+            kv_cache_dtype = torch.uint8
+            tq_bits = float(os.environ.get("TQ_BITS", "4"))
+            tq_outlier_frac = float(os.environ.get("TQ_OUTLIER_FRAC", "0.15"))
+            head_size = model_config.get_head_size()
+            num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+            n_outliers = max(1, int(head_size * tq_outlier_frac)) if tq_outlier_frac > 0 else 0
+            normal_size = head_size - n_outliers
+            outlier_bytes = n_outliers * 2
+            packed_bytes = math.ceil(normal_size * tq_bits / 8)
+            norm_bytes = 2
+            slot_bytes = outlier_bytes + packed_bytes + norm_bytes
+            turboquant_attn_page_size_1_token = num_kv_heads * 2 * slot_bytes
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            turboquant_attn_page_size_1_token = None
 
         # get attention page size (for 1 token)
         # Attention backend constraints:
@@ -163,12 +182,15 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
-            attn_page_size_1_token = FullAttentionSpec(
-                block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
-                dtype=kv_cache_dtype,
-            ).page_size_bytes
+            if cache_config.cache_dtype == "turboquant":
+                attn_page_size_1_token = turboquant_attn_page_size_1_token
+            else:
+                attn_page_size_1_token = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=kv_cache_dtype,
+                ).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,

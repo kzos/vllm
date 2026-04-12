@@ -400,10 +400,13 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
             tq_lite = os.environ.get("TQ_LITE", "0") in ("1", "true", "True")
-            tq_bits = int(os.environ.get("TQ_BITS", "4"))
+            tq_use_qjl = os.environ.get("TQ_USE_QJL", "0") in ("1", "true", "True")
+            tq_bits = float(os.environ.get("TQ_BITS", "4"))
+            tq_outlier_frac = float(os.environ.get("TQ_OUTLIER_FRAC", "0.15"))
             self._turboquant_config = TurboQuantConfig(
                 bit_width=tq_bits,
-                outlier_fraction=0.15,
+                use_qjl=tq_use_qjl,
+                outlier_fraction=tq_outlier_frac,
                 lite_mode=tq_lite,
             )
 
@@ -445,8 +448,27 @@ class Attention(nn.Module, AttentionLayerBase):
                 layer_idx=layer_idx + 10000,
                 device=init_device,
             )
-            # Calibrate outlier channels on first batch
-            self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
+            tq_map_json = os.environ.get("TQ_OUTLIER_MAP_JSON")
+            if tq_map_json:
+                import json
+                from pathlib import Path
+                map_path = Path(tq_map_json)
+                if map_path.exists():
+                    data = json.loads(map_path.read_text())
+                    layer_data = data.get(prefix)
+                    if layer_data is not None:
+                        if layer_data.get('k') is not None:
+                            self._tq_k_state.set_outlier_channels(layer_data['k'])
+                        if layer_data.get('v') is not None:
+                            self._tq_v_state.set_outlier_channels(layer_data['v'])
+                        self._tq_needs_calibration = False
+                    else:
+                        self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
+                else:
+                    self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
+            else:
+                # Calibrate outlier channels on first batch
+                self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
 
         # for attn backends supporting query quantization
         self.query_quant = None

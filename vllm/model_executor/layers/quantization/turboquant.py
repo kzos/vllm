@@ -401,6 +401,21 @@ class TurboQuantState:
             x = x[..., : self.normal_size]
         return x
 
+    def set_outlier_channels(self, channels: list[int]) -> None:
+        sorted_channels = sorted(int(x) for x in channels)
+        self.outlier_idx = torch.tensor(sorted_channels, dtype=torch.long, device=self.device)
+        all_idx = torch.arange(self.head_size, dtype=torch.long, device=self.device)
+        outlier_mask = torch.zeros(self.head_size, dtype=torch.bool, device=self.device)
+        outlier_mask[self.outlier_idx] = True
+        self.normal_idx = all_idx[~outlier_mask]
+        new_normal_size = self.normal_idx.shape[0]
+        if new_normal_size != self.normal_size:
+            self.normal_size = new_normal_size
+            self._init_rotation(self.config.seed + self.layer_idx, self.device)
+            if not self.config.is_fractional and self.mse_bits is not None:
+                self.codebook = _get_codebook(self.mse_bits, self._hadamard_d, self.device)
+                self.boundaries = (self.codebook[:-1] + self.codebook[1:]) / 2.0
+
     def calibrate_outliers(
         self,
         calibration_data: Tensor,
